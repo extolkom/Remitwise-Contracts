@@ -253,7 +253,6 @@ fn test_multisig_threshold_validation() {
 }
 
 #[test]
-#[should_panic(expected = "Already signed this transaction")]
 fn test_duplicate_signature_prevention() {
     let env = Env::default();
     env.mock_all_auths();
@@ -284,8 +283,40 @@ fn test_duplicate_signature_prevention() {
     let recipient = Address::generate(&env);
     let tx_id = client.withdraw(&owner, &token_contract.address(), &recipient, &2000_0000000);
 
+    // First sign increments the recorded signatures (proposer + member1)
     client.sign_transaction(&member1, &tx_id);
-    client.sign_transaction(&member1, &tx_id);
+
+    let pending_tx = client.get_pending_transaction(&tx_id).unwrap();
+    assert_eq!(pending_tx.signatures.len(), 2);
+
+    // Second sign by same signer should be idempotent and not advance the count
+    let result = client.try_sign_transaction(&member1, &tx_id);
+    assert!(result.is_ok());
+
+    let pending_tx = client.get_pending_transaction(&tx_id).unwrap();
+    assert_eq!(pending_tx.signatures.len(), 2);
+}
+
+#[test]
+fn test_sign_transaction_non_member_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member = Address::generate(&env);
+    let non_member = Address::generate(&env);
+    client.init(&owner, &vec![&env, member.clone()]);
+
+    let signers = vec![&env, owner.clone(), member.clone()];
+    client.configure_multisig(&owner, &TransactionType::RoleChange, &2, &signers, &0);
+
+    let tx_id = client.propose_role_change(&owner, &member, &FamilyRole::Admin);
+
+    // non-member is not authorized as signer for this tx type
+    let result = client.try_sign_transaction(&non_member, &tx_id);
+    assert_eq!(result, Err(Ok(Error::SignerNotMember)));
 }
 
 #[test]

@@ -745,13 +745,20 @@ impl FamilyWallet {
 
         tx_id
     }
-    pub fn sign_transaction(env: Env, signer: Address, tx_id: u64) -> bool {
+    /// Sign a pending multisig transaction.
+    ///
+    /// Idempotency: repeated calls by the same `signer` for the same `tx_id` are
+    /// treated as a no-op and do not increase the recorded approval count. The
+    /// proposer's implicit approval (added when the proposal is created) is
+    /// respected and will not be double-counted if the proposer calls this
+    /// method again.
+    pub fn sign_transaction(env: Env, signer: Address, tx_id: u64) -> Result<bool, Error> {
         signer.require_auth();
         Self::require_not_paused(&env);
         Self::require_role_at_least(&env, &signer, FamilyRole::Member);
 
         if !Self::is_family_member(&env, &signer) {
-            panic!("Only family members can sign transactions");
+            return Err(Error::Unauthorized);
         }
 
         Self::extend_instance_ttl(&env);
@@ -768,12 +775,13 @@ impl FamilyWallet {
 
         let current_time = env.ledger().timestamp();
         if current_time > pending_tx.expires_at {
-            panic!("Transaction expired");
+            return Err(Error::TransactionExpired);
         }
 
+        // If signer already recorded, no-op (idempotent).
         for sig in pending_tx.signatures.iter() {
             if sig.clone() == signer {
-                panic!("Already signed this transaction");
+                return Ok(false);
             }
         }
 
@@ -792,7 +800,7 @@ impl FamilyWallet {
         }
 
         if !is_authorized {
-            panic!("Signer not authorized for this transaction type");
+            return Err(Error::SignerNotMember);
         }
 
         pending_tx.signatures.push_back(signer.clone());
@@ -833,7 +841,7 @@ impl FamilyWallet {
                     .set(&symbol_short!("EXEC_TXS"), &executed_txs);
             }
 
-            return true;
+            return Ok(true);
         }
 
         pending_txs.set(tx_id, pending_tx);
@@ -841,7 +849,7 @@ impl FamilyWallet {
             .instance()
             .set(&symbol_short!("PEND_TXS"), &pending_txs);
 
-        true
+        Ok(true)
     }
 
     pub fn withdraw(
