@@ -608,6 +608,48 @@ pub struct ScheduleCancelledEvent {
 }
 ```
 
+### Event: Remittance Schedule Due Execution
+
+**Topic:** `("split", "sch_exec")`
+
+**Data Structure:**
+```rust
+pub tuple (
+    pub schedule_id: u32,           // Schedule ID that was executed
+    pub amount: i128,               // Schedule amount (for audit trail)
+)
+```
+
+**Emitted When:** A schedule becomes due (`next_due <= current_time`) and is executed by
+`execute_due_remittance_schedules`. This event tracks the executor's activity for auditing
+and indexing purposes. The actual distribution is still performed separately via `distribute_usdc`.
+
+**Security Notes:**
+- Emitted only after `last_executed` is set, ensuring idempotency.
+- Emitted even if the schedule is one-off and becomes inactive after execution.
+- Permissionless executor ensures this event is auditable on-chain without requiring owner authorization.
+
+### Event: Remittance Schedule Missed Intervals
+
+**Topic:** `("split", "sch_miss")`
+
+**Data Structure:**
+```rust
+pub tuple (
+    pub schedule_id: u32,           // Schedule ID
+    pub missed_count: u32,          // Number of intervals that were skipped
+)
+```
+
+**Emitted When:** A recurring schedule is executed, and one or more intervals were missed
+(i.e., execution was delayed). For example, if a schedule is due every 86,400 seconds but
+not executed for 3 intervals, `missed_count = 3` and this event is emitted.
+
+**Drift Handling:**
+- Indicates delayed executor runs or network congestion.
+- Allows off-chain systems to detect and respond to drift.
+- `next_due` is advanced past all missed intervals, so the schedule "catches up."
+
 ### Event: Contract Paused/Unpaused
 
 **Topic:** `("split", "paused")` or `("split", "unpaused")`

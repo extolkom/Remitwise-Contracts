@@ -285,3 +285,313 @@ fn test_distribute_usdc_signed_hash_mismatch() {
     let result = client.try_distribute_usdc_signed(&request, &wrong_hash);
     assert_eq!(result, Err(Ok(RemittanceSplitError::RequestHashMismatch)));
 }
+
+// ============================================================================
+// Execute Due Remittance Schedules Tests
+// ============================================================================
+// These tests verify the idempotent executor for remittance schedules.
+// Key security properties: due/not-due partitioning, idempotency on repeated
+// calls, InactiveSchedule skipping, and correct next_due advancement.
+// ============================================================================
+
+#[test]
+fn test_execute_due_remittance_schedules_basic() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create a one-shot schedule due at time 3000
+    let schedule_id = client.create_remittance_schedule(&owner, &1_000, &3_000, &0);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Advance time past due date
+    set_time(&env, 3_500);
+
+    // Execute due schedules
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 1);
+    assert_eq!(executed.get(0).unwrap(), 1);
+
+    // Verify schedule is now inactive (one-off)
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert!(!schedule.active);
+    assert_eq!(schedule.last_executed, Some(3_500));
+}
+
+#[test]
+fn test_execute_recurring_remittance_schedule() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create a recurring schedule: 1000 amount, due at 3000, every 86400 seconds
+    let schedule_id = client.create_remittance_schedule(&owner, &1_000, &3_000, &86_400);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Advance time past first due date
+    set_time(&env, 3_500);
+    let executed = client.execute_due_remittance_schedules();
+
+    assert_eq!(executed.len(), 1);
+    assert_eq!(executed.get(0).unwrap(), 1);
+
+    // Verify next_due was advanced by interval
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert!(schedule.active);
+    assert_eq!(schedule.next_due, 3_000 + 86_400);
+    assert_eq!(schedule.last_executed, Some(3_500));
+    assert_eq!(schedule.missed_count, 0);
+}
+
+#[test]
+fn test_execute_missed_remittance_schedules() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create a recurring schedule
+    let schedule_id = client.create_remittance_schedule(&owner, &500, &3_000, &86_400);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Advance time far past multiple intervals: 3000 + 86400*3 + 100
+    set_time(&env, 3_000 + 86_400 * 3 + 100);
+    let executed = client.execute_due_remittance_schedules();
+
+    assert_eq!(executed.len(), 1);
+
+    // Verify missed_count is 3 (the three intervals that were skipped)
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert_eq!(schedule.missed_count, 3);
+    assert!(schedule.next_due > 3_000 + 86_400 * 3);
+    assert_eq!(schedule.last_executed, Some(3_000 + 86_400 * 3 + 100));
+}
+
+#[test]
+fn test_execute_idempotent_oneshot() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create one-shot schedule
+    let schedule_id = client.create_remittance_schedule(&owner, &750, &3_000, &0);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Advance time past due
+    set_time(&env, 3_500);
+
+    // First execution
+    let first = client.execute_due_remittance_schedules();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first.get(0).unwrap(), 1);
+
+    // Second execution at same timestamp must be idempotent (no-op)
+    let second = client.execute_due_remittance_schedules();
+    assert_eq!(second.len(), 0, "Second call must be a no-op");
+
+    // Verify schedule remains inactive
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert!(!schedule.active);
+    assert_eq!(schedule.last_executed, Some(3_500));
+}
+
+#[test]
+fn test_execute_idempotent_recurring() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create recurring schedule
+    let schedule_id = client.create_remittance_schedule(&owner, &300, &3_000, &86_400);
+    assert_eq!(schedule_id, Ok(1));
+
+    set_time(&env, 3_500);
+
+    // First execution
+    let first = client.execute_due_remittance_schedules();
+    assert_eq!(first.len(), 1);
+
+    let first_next_due = client.get_remittance_schedule(&1).unwrap().next_due;
+
+    // Second execution at same timestamp must not re-execute
+    let second = client.execute_due_remittance_schedules();
+    assert_eq!(second.len(), 0);
+
+    // Verify next_due unchanged (idempotent advancement)
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert_eq!(schedule.next_due, first_next_due);
+}
+
+#[test]
+fn test_execute_skips_inactive_schedules() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create schedule and cancel it
+    let schedule_id = client.create_remittance_schedule(&owner, &200, &3_000, &0);
+    assert_eq!(schedule_id, Ok(1));
+    
+    client.cancel_remittance_schedule(&owner, &1);
+
+    // Advance past due time
+    set_time(&env, 3_500);
+
+    // Execute should skip inactive schedule
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 0);
+}
+
+#[test]
+fn test_execute_skips_not_yet_due() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create schedule due at 3000
+    let schedule_id = client.create_remittance_schedule(&owner, &400, &3_000, &0);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Advance time but stay before due date
+    set_time(&env, 2_500);
+
+    // Execute should not execute (not yet due)
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 0);
+
+    // Verify schedule unchanged
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert!(schedule.active);
+    assert_eq!(schedule.last_executed, None);
+}
+
+#[test]
+fn test_execute_exactly_equal_next_due() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create schedule
+    let schedule_id = client.create_remittance_schedule(&owner, &600, &3_000, &0);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Advance exactly to next_due (edge case: == not just >)
+    set_time(&env, 3_000);
+
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 1, "Should execute when time == next_due");
+}
+
+#[test]
+fn test_execute_empty_schedule_set() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // No schedules created; just advance time
+    set_time(&env, 5_000);
+
+    // Execute on empty set should return empty Vec
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 0);
+}
+
+#[test]
+fn test_execute_all_inactive_set() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create and cancel multiple schedules
+    for i in 1..=3 {
+        let id = client.create_remittance_schedule(&owner, &100 * i as i128, &(3_000 + i as u64 * 1000), &0);
+        assert!(id.is_ok());
+        client.cancel_remittance_schedule(&owner, &(i as u32));
+    }
+
+    set_time(&env, 6_000);
+
+    // Execute should return empty (all inactive)
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 0);
+}
+
+#[test]
+fn test_execute_paused_contract_returns_empty() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create schedule
+    let schedule_id = client.create_remittance_schedule(&owner, &500, &3_000, &0);
+    assert_eq!(schedule_id, Ok(1));
+
+    // Pause contract
+    client.pause(&owner).unwrap();
+
+    set_time(&env, 3_500);
+
+    // Execute should return empty when paused
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 0);
+
+    // Verify schedule was NOT executed (unchanged)
+    let schedule = client.get_remittance_schedule(&1).unwrap();
+    assert!(schedule.active);
+    assert_eq!(schedule.last_executed, None);
+}
+
+#[test]
+fn test_execute_mixed_due_not_due() {
+    let env = Env::default();
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    // Create schedule 1: due at 2000 (one-off)
+    let id1 = client.create_remittance_schedule(&owner, &100, &2_000, &0);
+    assert_eq!(id1, Ok(1));
+
+    // Create schedule 2: due at 4000 (one-off)
+    let id2 = client.create_remittance_schedule(&owner, &200, &4_000, &0);
+    assert_eq!(id2, Ok(2));
+
+    // Advance to time 3000 (only schedule 1 is due)
+    set_time(&env, 3_000);
+
+    let executed = client.execute_due_remittance_schedules();
+    assert_eq!(executed.len(), 1);
+    assert_eq!(executed.get(0).unwrap(), 1);
+
+    // Verify only schedule 1 is inactive
+    assert!(!client.get_remittance_schedule(&1).unwrap().active);
+    assert!(client.get_remittance_schedule(&2).unwrap().active);
+}
+
+// Helper function to invoke execute_due_remittance_schedules via client
+// (Note: You may need to add this to the RemittanceSplitClient or call directly)
+pub fn set_time(env: &Env, timestamp: u64) {
+    env.ledger().set_timestamp(timestamp);
+}
