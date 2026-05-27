@@ -6,7 +6,6 @@
  */
 
 import Database from "better-sqlite3";
-import { xdr } from "@stellar/stellar-sdk";
 
 export class EventProcessor {
   constructor(private db: Database.Database) {}
@@ -105,8 +104,12 @@ export class EventProcessor {
     data: any,
     timestamp: number,
   ): void {
+    // INSERT OR IGNORE makes this idempotent: re-processing the same
+    // (ledger, tx_hash, topic) triple (e.g. after a reorg or replay) is a
+    // silent no-op rather than a duplicate-row error.
     const stmt = this.db.prepare(`
-      INSERT INTO events (ledger, tx_hash, contract_address, event_type, topic, data, timestamp)
+      INSERT OR IGNORE INTO events
+        (ledger, tx_hash, contract_address, event_type, topic, data, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
@@ -499,7 +502,7 @@ export class EventProcessor {
     txHash: string,
   ): void {
     const stmt = this.db.prepare(`
-      INSERT INTO family_wallet_events
+      INSERT OR IGNORE INTO family_wallet_events
         (event_type, contract_address, member, role, spending_limit, timestamp, ledger, tx_hash, raw_data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -525,7 +528,7 @@ export class EventProcessor {
     txHash: string,
   ): void {
     const stmt = this.db.prepare(`
-      INSERT INTO family_wallet_events
+      INSERT OR IGNORE INTO family_wallet_events
         (event_type, contract_address, member, limit_amount, timestamp, ledger, tx_hash, raw_data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -554,7 +557,7 @@ export class EventProcessor {
     txHash: string,
   ): void {
     const stmt = this.db.prepare(`
-      INSERT INTO family_wallet_events
+      INSERT OR IGNORE INTO family_wallet_events
         (event_type, contract_address, proposer, recipient, amount, timestamp, ledger, tx_hash, raw_data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -584,7 +587,7 @@ export class EventProcessor {
     txHash: string,
   ): void {
     const stmt = this.db.prepare(`
-      INSERT INTO family_wallet_events
+      INSERT OR IGNORE INTO family_wallet_events
         (event_type, contract_address, tx_id, timestamp, ledger, tx_hash, raw_data)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
@@ -616,7 +619,7 @@ export class EventProcessor {
     txHash: string,
   ): void {
     const stmt = this.db.prepare(`
-      INSERT INTO orchestrator_events
+      INSERT OR IGNORE INTO orchestrator_events
         (event_type, contract_address, executor, amount, timestamp, ledger, tx_hash, raw_data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -649,7 +652,7 @@ export class EventProcessor {
     txHash: string,
   ): void {
     const stmt = this.db.prepare(`
-      INSERT INTO orchestrator_events
+      INSERT OR IGNORE INTO orchestrator_events
         (event_type, contract_address, executor, error_code, timestamp, ledger, tx_hash, raw_data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -691,7 +694,7 @@ export class EventProcessor {
     // paused payload: (scope: Symbol, timestamp: u64)
     const scope =
       data[0] !== undefined ? String(data[0]) : data.scope || "GLOBAL";
-    this.insertKillswitchEvent(
+    const inserted = this.insertKillswitchEvent(
       "paused",
       contractAddress,
       scope,
@@ -702,14 +705,17 @@ export class EventProcessor {
       txHash,
       data,
     );
-    this.triggerKillswitchAlert(
-      "paused",
-      contractAddress,
-      scope,
-      null,
-      null,
-      timestamp,
-    );
+    // Only alert on first ingestion — skip on replay/reorg
+    if (inserted) {
+      this.triggerKillswitchAlert(
+        "paused",
+        contractAddress,
+        scope,
+        null,
+        null,
+        timestamp,
+      );
+    }
   }
 
   private processKillswitchUnpaused(
@@ -747,7 +753,7 @@ export class EventProcessor {
       data[0] !== undefined ? String(data[0]) : data.module_id || null;
     const funcName =
       data[1] !== undefined ? String(data[1]) : data.func_name || null;
-    this.insertKillswitchEvent(
+    const inserted = this.insertKillswitchEvent(
       "f_paused",
       contractAddress,
       null,
@@ -758,14 +764,16 @@ export class EventProcessor {
       txHash,
       data,
     );
-    this.triggerKillswitchAlert(
-      "f_paused",
-      contractAddress,
-      null,
-      moduleId,
-      funcName,
-      timestamp,
-    );
+    if (inserted) {
+      this.triggerKillswitchAlert(
+        "f_paused",
+        contractAddress,
+        null,
+        moduleId,
+        funcName,
+        timestamp,
+      );
+    }
   }
 
   private processKillswitchModulePaused(
@@ -778,7 +786,7 @@ export class EventProcessor {
     // m_paused payload: (module_id: Symbol, timestamp: u64)
     const moduleId =
       data[0] !== undefined ? String(data[0]) : data.module_id || null;
-    this.insertKillswitchEvent(
+    const inserted = this.insertKillswitchEvent(
       "m_paused",
       contractAddress,
       null,
@@ -789,14 +797,16 @@ export class EventProcessor {
       txHash,
       data,
     );
-    this.triggerKillswitchAlert(
-      "m_paused",
-      contractAddress,
-      null,
-      moduleId,
-      null,
-      timestamp,
-    );
+    if (inserted) {
+      this.triggerKillswitchAlert(
+        "m_paused",
+        contractAddress,
+        null,
+        moduleId,
+        null,
+        timestamp,
+      );
+    }
   }
 
   private insertKillswitchEvent(
@@ -809,13 +819,14 @@ export class EventProcessor {
     ledger: number,
     txHash: string,
     data: any,
-  ): void {
+  ): boolean {
+    // INSERT OR IGNORE: returns changes=0 when the row already exists (replay/reorg).
     const stmt = this.db.prepare(`
-      INSERT INTO killswitch_events
+      INSERT OR IGNORE INTO killswitch_events
         (event_type, contract_address, scope, module_id, func_name, timestamp, ledger, tx_hash, raw_data, alert_sent)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `);
-    stmt.run(
+    const result = stmt.run(
       eventType,
       contractAddress,
       scope,
@@ -826,6 +837,8 @@ export class EventProcessor {
       txHash,
       JSON.stringify(data),
     );
+    // Return true only when a new row was inserted (not a replay)
+    return result.changes > 0;
   }
 
   /**
