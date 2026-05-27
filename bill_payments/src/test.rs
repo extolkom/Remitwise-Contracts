@@ -3884,4 +3884,93 @@ mod testsuit {
         assert_eq!(archived.tags.len(), 1);
         assert_eq!(archived.tags.get(0).unwrap(), String::from_str(&env, "archived"));
     }
+
+    /// Incident containment note: The schedule_unpause and emergency_pause_all mechanisms provide
+    /// critical administrative controls to halt and resume contract execution during emergencies.
+    /// These tests ensure these controls properly restrict unauthorized access and handle timing.
+
+    /// /// Comments documenting precedence and timing:
+    /// /// schedule_unpause restricts `unpause` until the ledger time >= `at_timestamp`.
+    #[test]
+    fn test_scheduled_unpause_timing_and_auth() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let admin = <soroban_sdk::Address as AddressTrait>::generate(&env);
+        let other = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+        client.set_pause_admin(&admin, &admin);
+
+        // Pause the contract
+        env.mock_all_auths();
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        // Set ledger time
+        set_ledger_time(&env, 1, 1_000_000);
+
+        // Schedule unpause in the future
+        let unpause_time = 2_000_000;
+        env.mock_all_auths();
+        client.schedule_unpause(&admin, &unpause_time);
+
+        // Try to unpause before scheduled time - should fail with ContractPaused
+        env.mock_all_auths();
+        let res = client.try_unpause(&admin);
+        assert_eq!(res, Err(Ok(Error::ContractPaused)));
+
+        // Unpause exactly at at_timestamp - should succeed
+        set_ledger_time(&env, 2, unpause_time);
+        env.mock_all_auths();
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+
+        // Verify unauthorized caller cannot schedule_unpause
+        env.mock_all_auths();
+        let auth_res = client.try_schedule_unpause(&other, &3_000_000);
+        assert_eq!(auth_res, Err(Ok(Error::UnauthorizedPause)));
+    }
+
+    /// /// Comments documenting precedence and timing:
+    /// /// emergency_pause_all immediately pauses global state AND overrides any per-function unpaused states,
+    /// /// acting as a complete safety override.
+    #[test]
+    fn test_emergency_pause_all_overrides_function_unpause() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let admin = <soroban_sdk::Address as AddressTrait>::generate(&env);
+        let other = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+        client.set_pause_admin(&admin, &admin);
+
+        // Ensure initially unpaused
+        assert!(!client.is_paused());
+
+        // Pause specific function
+        env.mock_all_auths();
+        client.pause_function(&admin, &pause_functions::CREATE_BILL);
+        assert!(client.is_function_paused_public(&pause_functions::CREATE_BILL));
+
+        // Unpause specific function
+        env.mock_all_auths();
+        client.unpause_function(&admin, &pause_functions::CREATE_BILL);
+        assert!(!client.is_function_paused_public(&pause_functions::CREATE_BILL));
+
+        // Trigger emergency_pause_all
+        env.mock_all_auths();
+        client.emergency_pause_all(&admin);
+
+        // Verify global pause is active
+        assert!(client.is_paused());
+        // Verify CREATE_BILL is paused (override)
+        assert!(client.is_function_paused_public(&pause_functions::CREATE_BILL));
+
+        // Verify unauthorized caller cannot emergency_pause_all
+        env.mock_all_auths();
+        let auth_res = client.try_emergency_pause_all(&other);
+        assert_eq!(auth_res, Err(Ok(Error::UnauthorizedPause)));
+    }
 }
