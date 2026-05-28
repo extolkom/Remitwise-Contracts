@@ -193,6 +193,14 @@ pub struct SpendingLimitUpdatedEvent {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct ProposalInvalidatedEvent {
+    pub tx_id: u64,
+    pub reason: Symbol,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct ArchivedTransaction {
     pub tx_id: u64,
     pub tx_type: TransactionType,
@@ -279,6 +287,7 @@ pub enum Error {
     InvalidPrecisionConfig = 20,
     InvalidProposalExpiry = 21,
     MemberAlreadyExists = 22,
+    QuorumUnachievable = 23,
 }
 
 #[contractimpl]
@@ -1178,6 +1187,10 @@ impl FamilyWallet {
             .instance()
             .set(&symbol_short!("MEMBERS"), &members);
 
+        // Re-validate in-flight proposals: strip signatures from the removed
+        // member and invalidate any proposal that can no longer reach quorum.
+        Self::revalidate_proposals_after_membership_change(&env);
+
         Self::append_access_audit(&env, symbol_short!("rem_mem"), &caller, Some(member), true);
         true
     }
@@ -2054,6 +2067,11 @@ impl FamilyWallet {
             .instance()
             .set(&symbol_short!("MEMBERS"), &members_map);
         Self::update_storage_stats(&env);
+
+        // Re-validate in-flight proposals after batch removal: strip signatures
+        // from removed members and invalidate proposals that can no longer reach quorum.
+        Self::revalidate_proposals_after_membership_change(&env);
+
         count
     }
 
@@ -2148,9 +2166,147 @@ impl FamilyWallet {
         }
     }
 
+    /// Manually trigger quorum re-validation for all in-flight proposals.
+    ///
+    /// This is useful after any membership or multisig-config change to ensure
+    /// proposals that can no longer reach quorum are invalidated immediately.
+    ///
+    /// # Authorization
+    /// Owner or Admin only.
+    ///
+    /// # Returns
+    /// The number of proposals that were invalidated (expired early).
+    pub fn revalidate_proposals(env: Env, caller: Address) -> u32 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        if !Self::is_owner_or_admin(&env, &caller) {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        Self::extend_instance_ttl(&env);
+        Self::revalidate_proposals_after_membership_change(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Re-validate every in-flight proposal against the current membership and
+    /// multisig configuration.
+    ///
+    /// For each pending proposal this function:
+    /// 1. Strips signatures from addresses that are no longer active members.
+    /// 2. Checks whether the remaining eligible signers in the multisig config
+    ///    can still satisfy the threshold.
+    /// 3. If quorum is unachievable, the proposal is invalidated by setting its
+    ///    `expires_at` to the current ledger timestamp (effectively expired) and
+    ///    emitting a `ProposalInvalidatedEvent`.
+    ///
+    /// Returns the count of proposals that were invalidated.
+    fn revalidate_proposals_after_membership_change(env: &Env) -> u32 {
+        let members: Map<Address, FamilyMember> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("MEMBERS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let mut pending_txs: Map<u64, PendingTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PEND_TXS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let now = env.ledger().timestamp();
+        let mut invalidated_count = 0u32;
+        let mut updated_txs: Vec<(u64, PendingTransaction)> = Vec::new(env);
+
+        for (tx_id, mut tx) in pending_txs.iter() {
+            // Skip already-expired proposals — they will be cleaned up separately.
+            if tx.expires_at <= now {
+                continue;
+            }
+
+            // --- Step 1: strip signatures from addresses no longer in the wallet ---
+            let mut valid_sigs: Vec<Address> = Vec::new(env);
+            for sig in tx.signatures.iter() {
+                if members.get(sig.clone()).is_some()
+                    && !Self::role_has_expired(env, &sig)
+                {
+                    valid_sigs.push_back(sig);
+                }
+            }
+            tx.signatures = valid_sigs;
+
+            // --- Step 2: count eligible signers in the multisig config ---
+            let config_key = Self::get_config_key(tx.tx_type);
+            let config: MultiSigConfig = match env.storage().instance().get(&config_key) {
+                Some(c) => c,
+                None => {
+                    // No config means the proposal can never execute — invalidate it.
+                    tx.expires_at = now;
+                    invalidated_count += 1;
+                    RemitwiseEvents::emit(
+                        env,
+                        EventCategory::System,
+                        EventPriority::High,
+                        symbol_short!("inv_prop"),
+                        ProposalInvalidatedEvent {
+                            tx_id,
+                            reason: symbol_short!("no_cfg"),
+                            timestamp: now,
+                        },
+                    );
+                    updated_txs.push_back((tx_id, tx));
+                    continue;
+                }
+            };
+
+            // Count how many configured signers are still active members.
+            let mut eligible_signers = 0u32;
+            for signer in config.signers.iter() {
+                if members.get(signer.clone()).is_some()
+                    && !Self::role_has_expired(env, &signer)
+                {
+                    eligible_signers += 1;
+                }
+            }
+
+            // --- Step 3: invalidate if quorum is now unachievable ---
+            // Quorum is unachievable when the total number of eligible signers
+            // (including those who already signed) is less than the threshold.
+            // We use `eligible_signers` from the config list because only
+            // configured signers are allowed to sign (see `sign_transaction`).
+            if eligible_signers < config.threshold {
+                tx.expires_at = now;
+                invalidated_count += 1;
+                RemitwiseEvents::emit(
+                    env,
+                    EventCategory::System,
+                    EventPriority::High,
+                    symbol_short!("inv_prop"),
+                    ProposalInvalidatedEvent {
+                        tx_id,
+                        reason: symbol_short!("no_qrm"),
+                        timestamp: now,
+                    },
+                );
+            }
+
+            updated_txs.push_back((tx_id, tx));
+        }
+
+        // Persist all modified proposals back to storage.
+        for i in 0..updated_txs.len() {
+            if let Some((tx_id, tx)) = updated_txs.get(i) {
+                pending_txs.set(tx_id, tx);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PEND_TXS"), &pending_txs);
+
+        invalidated_count
+    }
 
     /// Enforces the emergency transfer daily volume cap and persists the updated `EM_VOL`.
     ///
