@@ -9,7 +9,7 @@ mod test;
 use remitwise_common::{clamp_limit, EventCategory, EventPriority, RemitwiseEvents};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, vec,
-    Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
 
 // Event topics
@@ -59,6 +59,7 @@ pub enum RemittanceSplitError {
     /// A destination account is the same as the sender, which would be a no-op transfer.
     SelfTransferNotAllowed = 13,
     DeadlineExpired = 14,
+    /// The deadline field is zero or exceeds MAX_DEADLINE_WINDOW_SECS from now.
     InvalidDeadline = 25,
 
     RequestHashMismatch = 15,
@@ -268,6 +269,7 @@ pub struct RemittanceSchedulePage {
     /// Number of items returned in this page.
     pub count: u32,
 }
+
 
 /// Split allocation output item for UI/analytics consumers.
 #[contracttype]
@@ -1052,7 +1054,7 @@ impl RemittanceSplit {
     /// 1. Off-chain: Create DistributeUsdcRequest with deadline = now() + 600 seconds
     /// 2. Off-chain: Call get_request_hash to obtain hash
     /// 3. Off-chain: Sign the hash with payer's private key
-    /// 4. On-chain: Call distribute_usdc_signed with request and signature
+    /// 4. On-chain: Call distribute_usdc_hashed with request and signature
     ///
     /// # Parameter Binding Fields
     /// All parameters are cryptographically bound via SHA-256:
@@ -1065,10 +1067,10 @@ impl RemittanceSplit {
     /// - `accounts.insurance`: Insurance destination (prevents fund misdirection)
     /// - `total_amount`: Total amount to distribute (prevents amount tampering)
     /// - `deadline`: Expiry time (prevents stale request use)
-    pub fn distribute_usdc_signed(
+    pub fn distribute_usdc_hashed(
         env: Env,
         request: DistributeUsdcRequest,
-        request_hash: u64,
+        request_hash: Bytes,
     ) -> Result<bool, RemittanceSplitError> {
         // Validate amount
         if request.total_amount <= 0 {
@@ -1078,19 +1080,24 @@ impl RemittanceSplit {
 
         // Validate deadline
         let current_time = env.ledger().timestamp();
-        if request.deadline == 0 || current_time > request.deadline {
+        if request.deadline == 0 {
+            Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
+            return Err(RemittanceSplitError::InvalidDeadline);
+        }
+        if current_time > request.deadline {
             Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
             return Err(RemittanceSplitError::DeadlineExpired);
         }
 
-        // Verify request hash matches computed hash
-        let computed_hash = Self::compute_request_hash(
-            symbol_short!("distH"),
-            request.from.clone(),
-            request.nonce,
-            request.total_amount,
-            request.deadline,
-        );
+        // Validate deadline is within reasonable bounds (max 1 hour from now)
+        let deadline_in_future = request.deadline - current_time;
+        if deadline_in_future > MAX_DEADLINE_WINDOW_SECS {
+            Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
+            return Err(RemittanceSplitError::InvalidDeadline);
+        }
+
+        // Verify request hash matches computed hash (binds all signed fields + domain_id)
+        let computed_hash = Self::get_request_hash(env.clone(), request.clone());
         if computed_hash.ne(&request_hash) {
             Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
             return Err(RemittanceSplitError::RequestHashMismatch);
@@ -1606,6 +1613,69 @@ impl RemittanceSplit {
     /// Compute a deterministic u64 request fingerprint.
     ///
     /// Binds: operation symbol bits + nonce + amount + deadline.
+    /// Compute the canonical SHA-256 binding hash for a `DistributeUsdcRequest`.
+    ///
+    /// Hash preimage layout (concatenated, in order):
+    ///  1. `DISTRIBUTE_USDC_DOMAIN`           — domain separator, prevents cross-domain replay
+    ///  2. `domain_id` = `symbol_short!("distrib")` — `SplitAuthPayload`-style functional tag
+    ///  3. `from`                              — sender address payload bits (8 bytes LE)
+    ///  4. `usdc_contract`                     — token contract payload bits (8 bytes LE)
+    ///  5. `accounts.spending`                 — destination address bits (8 bytes LE)
+    ///  6. `accounts.savings`                  — destination address bits (8 bytes LE)
+    ///  7. `accounts.bills`                    — destination address bits (8 bytes LE)
+    ///  8. `accounts.insurance`                — destination address bits (8 bytes LE)
+    ///  9. `total_amount`                      — i128 as 16 bytes LE
+    /// 10. `nonce`                             — u64 as 8 bytes LE
+    /// 11. `deadline`                          — u64 as 8 bytes LE
+    ///
+    /// Mutating *any* field in `request` yields a different 32-byte hash,
+    /// guaranteeing field-substitution resistance across all signed parameters.
+    pub fn get_request_hash(env: Env, request: DistributeUsdcRequest) -> Bytes {
+        let mut preimage = Bytes::new(&env);
+
+        // 1. Domain separator
+        preimage.extend_from_slice(DISTRIBUTE_USDC_DOMAIN);
+
+        // 2. Functional domain tag (SplitAuthPayload-style domain_id for distribute calls)
+        let did_bits: u64 = symbol_short!("distrib").to_val().get_payload();
+        preimage.extend_from_slice(&did_bits.to_le_bytes());
+
+        // 3. from address
+        let from_bits: u64 = request.from.to_val().get_payload();
+        preimage.extend_from_slice(&from_bits.to_le_bytes());
+
+        // 4. usdc_contract address
+        let usdc_bits: u64 = request.usdc_contract.to_val().get_payload();
+        preimage.extend_from_slice(&usdc_bits.to_le_bytes());
+
+        // 5. accounts.spending — prevents fund redirection
+        let spending_bits: u64 = request.accounts.spending.to_val().get_payload();
+        preimage.extend_from_slice(&spending_bits.to_le_bytes());
+
+        // 6. accounts.savings
+        let savings_bits: u64 = request.accounts.savings.to_val().get_payload();
+        preimage.extend_from_slice(&savings_bits.to_le_bytes());
+
+        // 7. accounts.bills
+        let bills_bits: u64 = request.accounts.bills.to_val().get_payload();
+        preimage.extend_from_slice(&bills_bits.to_le_bytes());
+
+        // 8. accounts.insurance
+        let insurance_bits: u64 = request.accounts.insurance.to_val().get_payload();
+        preimage.extend_from_slice(&insurance_bits.to_le_bytes());
+
+        // 9. total_amount — 16 bytes LE
+        preimage.extend_from_slice(&request.total_amount.to_le_bytes());
+
+        // 10. nonce — 8 bytes LE
+        preimage.extend_from_slice(&request.nonce.to_le_bytes());
+
+        // 11. deadline — 8 bytes LE
+        preimage.extend_from_slice(&request.deadline.to_le_bytes());
+
+        env.crypto().sha256(&preimage).into()
+    }
+
     /// Works in `no_std` — uses `Symbol::to_val()` to extract the raw
     /// packed bits instead of `to_string()`, which requires std's `ToString`.
     ///
@@ -2392,11 +2462,11 @@ impl RemittanceSplit {
         }
 
         let count = items.len();
-        let out_next_cursor = if end < len { end } else { 0 };
+        let next_cursor = if end < len { end } else { 0 };
 
         SchedulePage {
             items,
-            next_cursor: out_next_cursor,
+            next_cursor,
             count,
         }
     }
