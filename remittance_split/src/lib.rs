@@ -281,7 +281,7 @@ pub struct Allocation {
 
 /// Schedule for automatic remittance splits
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RemittanceSchedule {
     pub id: u32,
     pub owner: Address,

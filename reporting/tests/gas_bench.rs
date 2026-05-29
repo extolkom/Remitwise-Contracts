@@ -548,7 +548,7 @@ fn bench_financial_health_report_small_5_items() {
     );
 
     let (cpu, mem, report) = measure(&env, || {
-        client.get_financial_health_report(&user, &500_000i128, &PERIOD_START, &PERIOD_END)
+        client.get_financial_health_report(&user, &user, &500_000i128, &PERIOD_START, &PERIOD_END)
     });
 
     assert!(report.health_score.score <= 100);
@@ -578,7 +578,7 @@ fn bench_financial_health_report_medium_25_items() {
     );
 
     let (cpu, mem, report) = measure(&env, || {
-        client.get_financial_health_report(&user, &500_000i128, &PERIOD_START, &PERIOD_END)
+        client.get_financial_health_report(&user, &user, &500_000i128, &PERIOD_START, &PERIOD_END)
     });
 
     assert!(report.health_score.score <= 100);
@@ -611,7 +611,7 @@ fn bench_financial_health_report_large_50_items() {
     );
 
     let (cpu, mem, report) = measure(&env, || {
-        client.get_financial_health_report(&user, &500_000i128, &PERIOD_START, &PERIOD_END)
+        client.get_financial_health_report(&user, &user, &500_000i128, &PERIOD_START, &PERIOD_END)
     });
 
     assert!(report.health_score.score <= 100);
@@ -662,7 +662,7 @@ fn store_n_reports(
         let user = Address::generate(env);
         let period_key = PERIOD_START + (i as u64) * 3_600;
         let report =
-            client.get_financial_health_report(&user, &100_000i128, &PERIOD_START, &PERIOD_END);
+            client.get_financial_health_report(&user, &user, &100_000i128, &PERIOD_START, &PERIOD_END);
         client.store_report(&user, &report, &period_key);
     }
 

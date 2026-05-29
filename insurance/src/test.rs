@@ -1747,3 +1747,4 @@ fn test_batch_premium_paid_event_payload_schema() {
     assert_eq!(data.next_payment_date, 1_000_000 + 60 * 86_400);
     assert_eq!(data.timestamp, 2_000_000u64);
 }
+} // end mod tests

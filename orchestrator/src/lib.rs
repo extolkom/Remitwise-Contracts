@@ -32,11 +32,6 @@ pub struct AuditEntry {
     pub success: bool,
 }
 
-/// Cumulative execution statistics stored under the `STATS` key.
-///
-/// `evicted_entries` counts how many audit records have been dropped from the
-/// ring-buffer since contract initialization, giving operators a signal that
-/// the log has rotated and external archival may be needed.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionStats {
