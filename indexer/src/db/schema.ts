@@ -97,7 +97,10 @@ function createTables(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_splits_executed ON remittance_splits(executed);
   `);
 
-  // Events table for raw event storage
+  // Events table for raw event storage.
+  // The unique constraint on (ledger, tx_hash, topic) makes ingestion idempotent:
+  // re-processing the same ledger range (e.g. after a reorg or replay) will
+  // silently skip rows that already exist rather than creating duplicates.
   db.exec(`
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,7 +110,8 @@ function createTables(db: Database.Database): void {
       event_type TEXT NOT NULL,
       topic TEXT NOT NULL,
       data TEXT NOT NULL,
-      timestamp INTEGER NOT NULL
+      timestamp INTEGER NOT NULL,
+      UNIQUE (ledger, tx_hash, topic)
     );
     CREATE INDEX IF NOT EXISTS idx_events_ledger ON events(ledger);
     CREATE INDEX IF NOT EXISTS idx_events_contract ON events(contract_address);
@@ -122,7 +126,8 @@ function createTables(db: Database.Database): void {
     );
   `);
 
-  // Family Wallet events table
+  // Family Wallet events table.
+  // Idempotency key: (ledger, tx_hash, event_type) — one row per event type per tx.
   db.exec(`
     CREATE TABLE IF NOT EXISTS family_wallet_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,14 +144,16 @@ function createTables(db: Database.Database): void {
       timestamp INTEGER NOT NULL,
       ledger INTEGER NOT NULL,
       tx_hash TEXT NOT NULL,
-      raw_data TEXT NOT NULL
+      raw_data TEXT NOT NULL,
+      UNIQUE (ledger, tx_hash, event_type)
     );
     CREATE INDEX IF NOT EXISTS idx_fw_events_type ON family_wallet_events(event_type);
     CREATE INDEX IF NOT EXISTS idx_fw_events_member ON family_wallet_events(member);
     CREATE INDEX IF NOT EXISTS idx_fw_events_timestamp ON family_wallet_events(timestamp);
   `);
 
-  // Orchestrator flow events table
+  // Orchestrator flow events table.
+  // Idempotency key: (ledger, tx_hash, event_type).
   db.exec(`
     CREATE TABLE IF NOT EXISTS orchestrator_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,14 +165,16 @@ function createTables(db: Database.Database): void {
       timestamp INTEGER NOT NULL,
       ledger INTEGER NOT NULL,
       tx_hash TEXT NOT NULL,
-      raw_data TEXT NOT NULL
+      raw_data TEXT NOT NULL,
+      UNIQUE (ledger, tx_hash, event_type)
     );
     CREATE INDEX IF NOT EXISTS idx_orch_events_type ON orchestrator_events(event_type);
     CREATE INDEX IF NOT EXISTS idx_orch_events_executor ON orchestrator_events(executor);
     CREATE INDEX IF NOT EXISTS idx_orch_events_timestamp ON orchestrator_events(timestamp);
   `);
 
-  // Emergency Killswitch events table — drives alerting hooks
+  // Emergency Killswitch events table — drives alerting hooks.
+  // Idempotency key: (ledger, tx_hash, event_type).
   db.exec(`
     CREATE TABLE IF NOT EXISTS killswitch_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,7 +187,8 @@ function createTables(db: Database.Database): void {
       ledger INTEGER NOT NULL,
       tx_hash TEXT NOT NULL,
       raw_data TEXT NOT NULL,
-      alert_sent INTEGER NOT NULL DEFAULT 0
+      alert_sent INTEGER NOT NULL DEFAULT 0,
+      UNIQUE (ledger, tx_hash, event_type)
     );
     CREATE INDEX IF NOT EXISTS idx_ks_events_type ON killswitch_events(event_type);
     CREATE INDEX IF NOT EXISTS idx_ks_events_timestamp ON killswitch_events(timestamp);
