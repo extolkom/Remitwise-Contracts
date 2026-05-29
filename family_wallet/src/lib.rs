@@ -732,13 +732,20 @@ impl FamilyWallet {
             .get(&symbol_short!("PROP_EXP"))
             .unwrap_or(DEFAULT_PROPOSAL_EXPIRY);
 
+        // If duration is 0, expiry is disabled — set expires_at to u64::MAX so the guard never trips.
+        let expires_at = if expiry_duration == 0 {
+            u64::MAX
+        } else {
+            timestamp + expiry_duration
+        };
+
         let pending_tx = PendingTransaction {
             tx_id,
             tx_type,
             proposer: proposer.clone(),
             signatures,
             created_at: timestamp,
-            expires_at: timestamp + expiry_duration,
+            expires_at,
             data: data.clone(),
         };
 
@@ -755,6 +762,18 @@ impl FamilyWallet {
 
         tx_id
     }
+    /// Check whether a pending proposal has expired.
+    ///
+    /// A proposal is expired when `env.ledger().timestamp() > pending.expires_at`.
+    /// This guard is independent of `cleanup_expired_pending` — it prevents
+    /// signing and execution even if cleanup has not been run.
+    ///
+    /// When the global `PROP_EXP` is set to `0` (disabled), `expires_at` is
+    /// set to `u64::MAX` so this check always passes.
+    fn proposal_expired(env: &Env, pending: &PendingTransaction) -> bool {
+        env.ledger().timestamp() > pending.expires_at
+    }
+
     pub fn sign_transaction(env: Env, signer: Address, tx_id: u64) -> bool {
         signer.require_auth();
         Self::require_not_paused(&env);
@@ -776,8 +795,7 @@ impl FamilyWallet {
             .get(tx_id)
             .unwrap_or_else(|| panic!("Transaction not found"));
 
-        let current_time = env.ledger().timestamp();
-        if current_time > pending_tx.expires_at {
+        if Self::proposal_expired(&env, &pending_tx) {
             panic!("Transaction expired");
         }
 
@@ -1720,6 +1738,9 @@ impl FamilyWallet {
     /// # Security
     /// Only the Owner can set this value, and their role must not be expired.
     ///
+    /// A value of `0` disables expiry (proposals never expire).
+    /// Values greater than `MAX_PROPOSAL_EXPIRY` are rejected.
+    ///
     /// # Errors
     /// Panics if the contract is paused.
     pub fn set_proposal_expiry(env: Env, caller: Address, expiry: u64) -> bool {
@@ -1739,7 +1760,7 @@ impl FamilyWallet {
             panic!("Role has expired");
         }
 
-        if expiry == 0 || expiry > MAX_PROPOSAL_EXPIRY {
+        if expiry > MAX_PROPOSAL_EXPIRY {
             panic_with_error!(&env, Error::InvalidProposalExpiry);
         }
 
