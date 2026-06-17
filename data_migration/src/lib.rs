@@ -2152,4 +2152,142 @@ mod tests {
         assert_eq!(imported_goals[0].owner, "=MALICIOUS");
         assert_eq!(imported_goals[1].name, "+FORMULA");
     }
+
+    #[test]
+    fn test_import_from_json_rejects_incompatible_version_too_low() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        snapshot.header.version = MIN_SUPPORTED_VERSION - 1;
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let result = import_from_json(&bytes, &mut tracker, 123_456);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 0, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_json_rejects_incompatible_version_too_high() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        snapshot.header.version = SCHEMA_VERSION + 1;
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let result = import_from_json(&bytes, &mut tracker, 123_456);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 2, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_json_rejects_checksum_mismatch() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        snapshot.header.checksum = "invalid_checksum".into();
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let result = import_from_json(&bytes, &mut tracker, 123_456);
+        assert_eq!(result.unwrap_err(), MigrationError::ChecksumMismatch);
+    }
+
+    #[test]
+    fn test_import_from_binary_rejects_incompatible_version_too_low() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        snapshot.header.version = MIN_SUPPORTED_VERSION - 1;
+        let bytes = bincode::serialize(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let result = import_from_binary(&bytes, &mut tracker, 123_456);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 0, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_binary_rejects_incompatible_version_too_high() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        snapshot.header.version = SCHEMA_VERSION + 1;
+        let bytes = bincode::serialize(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let result = import_from_binary(&bytes, &mut tracker, 123_456);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 2, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_binary_rejects_checksum_mismatch() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        snapshot.header.checksum = "invalid_checksum".into();
+        let bytes = bincode::serialize(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let result = import_from_binary(&bytes, &mut tracker, 123_456);
+        assert_eq!(result.unwrap_err(), MigrationError::ChecksumMismatch);
+    }
+
+    #[test]
+    fn test_import_from_json_untracked_rejects_incompatible_version_too_low() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        snapshot.header.version = MIN_SUPPORTED_VERSION - 1;
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let result = import_from_json_untracked(&bytes);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 0, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_json_untracked_rejects_incompatible_version_too_high() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        snapshot.header.version = SCHEMA_VERSION + 1;
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let result = import_from_json_untracked(&bytes);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 2, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_json_untracked_rejects_checksum_mismatch() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        snapshot.header.checksum = "invalid_checksum".into();
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let result = import_from_json_untracked(&bytes);
+        assert_eq!(result.unwrap_err(), MigrationError::ChecksumMismatch);
+    }
+
+    #[test]
+    fn test_import_from_binary_untracked_rejects_incompatible_version_too_low() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        snapshot.header.version = MIN_SUPPORTED_VERSION - 1;
+        let bytes = bincode::serialize(&snapshot).unwrap();
+        let result = import_from_binary_untracked(&bytes);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 0, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_binary_untracked_rejects_incompatible_version_too_high() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        snapshot.header.version = SCHEMA_VERSION + 1;
+        let bytes = bincode::serialize(&snapshot).unwrap();
+        let result = import_from_binary_untracked(&bytes);
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrationError::IncompatibleVersion { found: 2, min: 1, max: 1 }
+        ));
+    }
+
+    #[test]
+    fn test_import_from_binary_untracked_rejects_checksum_mismatch() {
+        let mut snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        snapshot.header.checksum = "invalid_checksum".into();
+        let bytes = bincode::serialize(&snapshot).unwrap();
+        let result = import_from_binary_untracked(&bytes);
+        assert_eq!(result.unwrap_err(), MigrationError::ChecksumMismatch);
+    }
 }
