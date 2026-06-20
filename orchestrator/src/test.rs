@@ -46,7 +46,7 @@ fn setup_test() -> (Env, Address) {
     (env, owner)
 }
 
-fn register_orchestrator(env: &Env) -> OrchestratorClient {
+fn register_orchestrator(env: &Env) -> OrchestratorClient<'_> {
     let id = env.register_contract(None, Orchestrator);
     OrchestratorClient::new(env, &id)
 }
@@ -197,7 +197,7 @@ fn test_reentrancy_rejection() {
     }
 
     // Check it's still locked (because we set it manually and the call failed before acquiring)
-    assert_eq!(client.get_execution_state(), true);
+    assert!(client.get_execution_state());
 }
 
 #[test]
