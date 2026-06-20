@@ -933,7 +933,7 @@ mod tests_nonce_eviction {
         );
         assert_eq!(
             oldest_before_eviction_replay,
-            Err(Ok(OrchestratorError::InvalidNonce))
+            Err(Ok(OrchestratorError::NonceAlreadyUsed))
         );
 
         execute_signed_flow(&client, &executor, FLOW_AMOUNT, cap_nonce, deadline);
