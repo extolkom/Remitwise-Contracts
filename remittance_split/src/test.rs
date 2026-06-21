@@ -1941,6 +1941,7 @@ fn test_get_split_allocations_uninitialized_uses_default() {
     let contract_id = env.register_contract(None, RemittanceSplit);
 
     let total: i128 = 1_000;
+    let allocs = RemittanceSplit::get_split_allocations(&env, total)
     let allocs = env
         .as_contract(&contract_id, || RemittanceSplit::get_split_allocations(&env, total))
         .expect("uninitialized contract must not return an error for positive amount");
@@ -1961,6 +1962,10 @@ fn test_get_split_allocations_uninitialized_uses_default() {
 #[test]
 fn test_get_split_allocations_uninitialized_non_round_amount() {
     let env = Env::default();
+    env.register_contract(None, RemittanceSplit);
+
+    let total: i128 = 7; // prime; will produce remainders with default split
+    let allocs = RemittanceSplit::get_split_allocations(&env, total)
     let contract_id = env.register_contract(None, RemittanceSplit);
 
     let total: i128 = 7; // prime; will produce remainders with default split
@@ -1981,6 +1986,10 @@ fn test_get_split_allocations_single_100_percent_spending() {
     set_time(&env, 1_000);
 
     let (client, _owner, _token_addr, _) = setup_split(&env, 100, 0, 0, 0);
+    let _ = client; // client used only to initialize; call through impl directly
+
+    let total: i128 = 500;
+    let allocs = RemittanceSplit::get_split_allocations(&env, total)
 
     let total: i128 = 500;
     let allocs = env
@@ -2006,6 +2015,10 @@ fn test_get_split_allocations_single_100_percent_insurance() {
     set_time(&env, 1_000);
 
     let (client, _owner, _token_addr, _) = setup_split(&env, 0, 0, 0, 100);
+    let _ = client;
+
+    let total: i128 = 333;
+    let allocs = RemittanceSplit::get_split_allocations(&env, total)
 
     let total: i128 = 333;
     let allocs = env
@@ -2060,6 +2073,9 @@ fn test_get_split_allocations_amount_one_conservation() {
 
     // 25/25/25/25: each floor = floor(1*25/100) = 0; insurance = 1 - 0 - 0 - 0 = 1
     let (client, _owner, _token_addr, _) = setup_split(&env, 25, 25, 25, 25);
+    let _ = client;
+
+    let allocs = RemittanceSplit::get_split_allocations(&env, 1).expect("must succeed");
 
     let allocs = env
         .as_contract(&client.address, || RemittanceSplit::get_split_allocations(&env, 1))
@@ -2080,6 +2096,11 @@ fn test_get_split_allocations_ordering_is_deterministic() {
     set_time(&env, 1_000);
 
     let (client, _owner, _token_addr, _) = setup_split(&env, 40, 30, 20, 10);
+    let _ = client;
+
+    let total: i128 = 1_000;
+    let allocs1 = RemittanceSplit::get_split_allocations(&env, total).expect("first call");
+    let allocs2 = RemittanceSplit::get_split_allocations(&env, total).expect("second call");
 
     let total: i128 = 1_000;
     let allocs1 = env
@@ -2109,6 +2130,8 @@ fn test_get_split_allocations_order_matches_get_split() {
     let (client, _owner, _token_addr, _) = setup_split(&env, 40, 30, 20, 10);
 
     let total: i128 = 1_000;
+    let split = RemittanceSplit::get_split(&env); // [40, 30, 20, 10]
+    let allocs = RemittanceSplit::get_split_allocations(&env, total).expect("must succeed");
     let split = env.as_contract(&client.address, || RemittanceSplit::get_split(&env)); // [40, 30, 20, 10]
     let allocs = env
         .as_contract(&client.address, || RemittanceSplit::get_split_allocations(&env, total))
@@ -2128,6 +2151,16 @@ fn test_get_split_allocations_order_matches_get_split() {
     assert_conservation(&allocs, total);
 }
 
+/// Large amount: i128::MAX / 2 with default config must not overflow and must
+/// satisfy the conservation invariant.
+#[test]
+fn test_get_split_allocations_large_amount_default_config() {
+    let env = Env::default();
+    env.register_contract(None, RemittanceSplit); // uninitialized → default [50,30,15,5]
+
+    let total: i128 = i128::MAX / 2;
+    let allocs = RemittanceSplit::get_split_allocations(&env, total)
+        .expect("i128::MAX/2 must not overflow with default split");
 /// Large amount with default config must not overflow and must satisfy the
 /// conservation invariant. `calculate_split` multiplies `total * percent`
 /// before dividing by 100 (with checked arithmetic), so the largest safe input
@@ -2148,6 +2181,8 @@ fn test_get_split_allocations_large_amount_default_config() {
     assert_conservation(&allocs, total);
 }
 
+/// Large amount: i128::MAX / 2 with a single 100% spending slot — exercises the
+/// remainder path with a large value.
 /// Large amount with a single 100% spending slot — exercises the remainder path
 /// with a large value. The 100% slot makes 100 the binding multiplier in
 /// `checked_mul(total, 100)`, so `i128::MAX / 100` is the largest input that
@@ -2159,6 +2194,11 @@ fn test_get_split_allocations_large_amount_single_slot() {
     set_time(&env, 1_000);
 
     let (client, _owner, _token_addr, _) = setup_split(&env, 100, 0, 0, 0);
+    let _ = client;
+
+    let total: i128 = i128::MAX / 2;
+    let allocs = RemittanceSplit::get_split_allocations(&env, total)
+        .expect("i128::MAX/2 with 100/0/0/0 must not overflow");
 
     let total: i128 = i128::MAX / 100;
     let allocs = env
@@ -2181,6 +2221,10 @@ fn test_get_split_allocations_percentages_across_all_categories() {
 
     // 33/33/33/1 — non-round split that produces visible dust
     let (client, _owner, _token_addr, _) = setup_split(&env, 33, 33, 33, 1);
+    let _ = client;
+
+    let total: i128 = 10;
+    let allocs = RemittanceSplit::get_split_allocations(&env, total).expect("must succeed");
 
     let total: i128 = 10;
     let allocs = env
