@@ -77,6 +77,27 @@ pub enum TransactionType {
     RegularWithdrawal = 6,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WithdrawalTier {
+    Regular,
+    Large,
+}
+
+/// Determines whether a withdrawal falls into the Regular or Large tier.
+/// 
+/// ### Boundary Policy (Pinned & Documented):
+/// * **Below Limit** (`amount < spending_limit`): `WithdrawalTier::Regular`
+/// * **Exactly At Boundary** (`amount == spending_limit`): `WithdrawalTier::Regular` (Inclusive)
+/// * **Above Limit** (`amount > spending_limit`): `WithdrawalTier::Large`
+pub fn select_withdrawal_tier(amount: i128, spending_limit: i128) -> WithdrawalTier {
+    if amount <= spending_limit {
+        WithdrawalTier::Regular
+    } else {
+        WithdrawalTier::Large
+    }
+}
+
+
 #[contracttype]
 #[derive(Clone)]
 pub struct MultiSigConfig {
@@ -694,108 +715,112 @@ impl FamilyWallet {
         Ok(true)
     }
 
-    pub fn propose_transaction(
-        env: Env,
-        proposer: Address,
-        tx_type: TransactionType,
-        data: TransactionData,
-    ) -> u64 {
-        proposer.require_auth();
-        Self::require_not_paused(&env);
-        Self::require_role_at_least(&env, &proposer, FamilyRole::Member);
+pub fn propose_transaction(
+    env: Env,
+    proposer: Address,
+    tx_type: TransactionType,
+    data: TransactionData,
+) -> u64 {
+    proposer.require_auth();
+    Self::require_not_paused(&env);
+    Self::require_role_at_least(&env, &proposer, FamilyRole::Member);
 
-        if !Self::is_family_member(&env, &proposer) {
-            panic!("Only family members can propose transactions");
-        }
-
-        let config_key = match tx_type {
-            TransactionType::RegularWithdrawal => {
-                Self::get_config_key(TransactionType::LargeWithdrawal)
-            }
-            _ => Self::get_config_key(tx_type),
-        };
-
-        let config: MultiSigConfig = env
-            .storage()
-            .instance()
-            .get(&config_key)
-            .unwrap_or_else(|| panic!("Multi-sig config not found"));
-
-        let requires_multisig = match (&tx_type, &data) {
-            (TransactionType::RegularWithdrawal, TransactionData::Withdrawal(_, _, amount)) => {
-                *amount > config.spending_limit
-            }
-            (TransactionType::LargeWithdrawal, _) => true,
-            (TransactionType::RegularWithdrawal, _) => false,
-            _ => true,
-        };
-
-        if !requires_multisig {
-            return Self::execute_transaction_internal(&env, &proposer, &tx_type, &data, false);
-        }
-
-        Self::extend_instance_ttl(&env);
-
-        let mut next_tx_id: u64 = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("NEXT_TX"))
-            .unwrap_or(1);
-
-        let tx_id = next_tx_id;
-        next_tx_id += 1;
-
-        env.storage()
-            .instance()
-            .set(&symbol_short!("NEXT_TX"), &next_tx_id);
-
-        let timestamp = env.ledger().timestamp();
-        let mut signatures = Vec::new(&env);
-        signatures.push_back(proposer.clone());
-
-        let expiry_duration: u64 = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("PROP_EXP"))
-            .unwrap_or(DEFAULT_PROPOSAL_EXPIRY);
-
-        // If duration is 0, expiry is disabled — set expires_at to u64::MAX so the guard never trips.
-        let expires_at = if expiry_duration == 0 {
-            u64::MAX
-        } else {
-            timestamp + expiry_duration
-        };
-
-        let pending_tx = PendingTransaction {
-            tx_id,
-            tx_type,
-            proposer: proposer.clone(),
-            signatures,
-            created_at: timestamp,
-            expires_at,
-            data: data.clone(),
-        };
-
-        let mut pending_txs: Map<u64, PendingTransaction> = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("PEND_TXS"))
-            .unwrap_or_else(|| panic!("Pending transactions map not initialized"));
-
-        pending_txs.set(tx_id, pending_tx);
-        env.storage()
-            .instance()
-            .set(&symbol_short!("PEND_TXS"), &pending_txs);
-
-        tx_id
+    if !Self::is_family_member(&env, &proposer) {
+        panic!("Only family members can propose transactions");
     }
-    /// Sign a pending multisig transaction.
-    ///
-    /// Idempotency: repeated calls by the same `signer` for the same `tx_id` are
-    /// treated as a no-op and do not increase the recorded approval count. The
-    /// proposer's implicit approval (added when the proposal is created) is
-    /// respected and will not be double-counted if the proposer calls this
-    /// method again.
+
+    // 1. Fetch the baseline Regular Withdrawal config to get the definitive spending limit boundary
+    let reg_config_key = Self::get_config_key(TransactionType::RegularWithdrawal);
+    let reg_config: MultiSigConfig = env
+        .storage()
+        .instance()
+        .get(&reg_config_key)
+        .unwrap_or_else(|| panic!("Regular multi-sig config not found"));
+
+    // 2. Intercept and align the transaction type based on the actual withdrawal amount
+    let mut requires_multisig = true;
+    let mut resolved_tx_type = tx_type.clone(); // Create a mutable clone instead of modifying the argument
+
+    if let TransactionData::Withdrawal(_, _, amount) = &data {
+        // Cast spending_limit to i128 to match the amount type safely
+        let limit_i128 = reg_config.spending_limit as i128;
+        let tier = select_withdrawal_tier(*amount, limit_i128);
+        
+        match tier {
+            WithdrawalTier::Regular => {
+                resolved_tx_type = TransactionType::RegularWithdrawal;
+                requires_multisig = true; 
+            }
+            WithdrawalTier::Large => {
+                resolved_tx_type = TransactionType::LargeWithdrawal;
+                requires_multisig = true;
+            }
+        }
+    } else if let TransactionType::RegularWithdrawal = resolved_tx_type {
+        // Fallback for non-withdrawal shapes incorrectly marked as regular withdrawals
+        requires_multisig = false;
+    }
+
+    // 3. Immediately route un-multisigged actions to internal execution
+    if !requires_multisig {
+        return Self::execute_transaction_internal(&env, &proposer, &resolved_tx_type, &data, false);
+    }
+
+    Self::extend_instance_ttl(&env);
+
+    let mut next_tx_id: u64 = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("NEXT_TX"))
+        .unwrap_or(1);
+
+    let tx_id = next_tx_id;
+    next_tx_id += 1;
+
+    env.storage()
+        .instance()
+        .set(&symbol_short!("NEXT_TX"), &next_tx_id);
+
+    let timestamp = env.ledger().timestamp();
+    let mut signatures = Vec::new(&env);
+    signatures.push_back(proposer.clone());
+
+    let expiry_duration: u64 = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("PROP_EXP"))
+        .unwrap_or(DEFAULT_PROPOSAL_EXPIRY);
+
+    let expires_at = if expiry_duration == 0 {
+        u64::MAX
+    } else {
+        timestamp + expiry_duration
+    };
+
+    let pending_tx = PendingTransaction {
+        tx_id,
+        tx_type: resolved_tx_type, // Persisted under the mathematically correct and normalized type
+        proposer: proposer.clone(),
+        signatures,
+        created_at: timestamp,
+        expires_at,
+        data: data.clone(),
+    };
+
+    let mut pending_txs: Map<u64, PendingTransaction> = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("PEND_TXS"))
+        .unwrap_or_else(|| panic!("Pending transactions map not initialized"));
+
+    pending_txs.set(tx_id, pending_tx);
+    env.storage()
+        .instance()
+        .set(&symbol_short!("PEND_TXS"), &pending_txs);
+
+    tx_id
+}
+
     pub fn sign_transaction(env: Env, signer: Address, tx_id: u64) -> Result<bool, Error> {
         signer.require_auth();
         Self::require_not_paused(&env);
