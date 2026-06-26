@@ -311,6 +311,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Financial Health Score Model](docs/HEALTH_SCORE.md) - HealthScore component weights, inputs, clamping, and worked examples
 - [Frontend Integration Notes](docs/frontend-integration.md)
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
+- [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
 - [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
 - [Tagging Feature](TAGGING_FEATURE.md) - Tag-based organization system
