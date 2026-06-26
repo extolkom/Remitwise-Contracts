@@ -266,13 +266,18 @@ impl Orchestrator {
         let rs_client = interface::RemittanceSplitClient::new(env, &params.remittance_split);
         let allocations = rs_client.calculate_split(&params.total_amount);
 
-        // Allocations come from an external contract whose return vector we do not
-        // control. Validate bounds explicitly so a short or malformed response
-        // returns InvalidAmount instead of panicking with EXEC_LOCK held.
-        let _spending_amt = allocations.get(0).ok_or(OrchestratorError::InvalidAmount)?;
+        // Bounds contract: calculate_split must return exactly 4 non-negative
+        // allocations [spending, savings, bills, insurance]. Checked indexing
+        // here ensures a short or hostile response produces a typed
+        // InvalidAmount rather than an out-of-bounds panic while the EXEC_LOCK
+        // is held.
         let savings_amt = allocations.get(1).ok_or(OrchestratorError::InvalidAmount)?;
         let bills_amt = allocations.get(2).ok_or(OrchestratorError::InvalidAmount)?;
         let insurance_amt = allocations.get(3).ok_or(OrchestratorError::InvalidAmount)?;
+
+        if savings_amt < 0 || bills_amt < 0 || insurance_amt < 0 {
+            return Err(OrchestratorError::InvalidAmount);
+        }
 
         // 3. Downstream calls
         if savings_amt > 0 {
@@ -938,14 +943,18 @@ impl Orchestrator {
         // response must return InvalidAmount rather than panic while EXEC_LOCK is held.
         let rs_client = interface::RemittanceSplitClient::new(env, &rs_addr);
         let allocations = rs_client.calculate_split(&amount);
-        if allocations.len() < 4 {
-            return Err(OrchestratorError::InvalidAmount);
-        }
-
-        let _spending_amt = allocations.get(0).ok_or(OrchestratorError::InvalidAmount)?;
+        // Bounds contract: calculate_split must return exactly 4 non-negative
+        // allocations [spending, savings, bills, insurance]. Checked indexing
+        // ensures a short or hostile downstream response yields a typed
+        // InvalidAmount error rather than an out-of-bounds panic while the
+        // EXEC_LOCK is held.
         let savings_amt = allocations.get(1).ok_or(OrchestratorError::InvalidAmount)?;
         let bills_amt = allocations.get(2).ok_or(OrchestratorError::InvalidAmount)?;
         let insurance_amt = allocations.get(3).ok_or(OrchestratorError::InvalidAmount)?;
+
+        if savings_amt < 0 || bills_amt < 0 || insurance_amt < 0 {
+            return Err(OrchestratorError::InvalidAmount);
+        }
 
         // ---------------------------------------------------------------
         // Execution phase — writes with compensation tracking

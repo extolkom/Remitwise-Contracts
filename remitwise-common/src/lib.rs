@@ -383,13 +383,14 @@ impl RemitwiseEvents {
             use soroban_sdk::TryFromVal;
             let val = data.into_val(env);
             if let Ok(sc_val) = soroban_sdk::xdr::ScVal::try_from_val(env, &val) {
-                let xdr_bytes = sc_val.to_xdr(env);
-                let size = xdr_bytes.len();
-                if size > 256 {
-                    panic!(
-                        "Event data size {} exceeds the 256-byte budget. Emits must be compact.",
-                        size
-                    );
+                if let Ok(xdr_bytes) = soroban_sdk::xdr::ToXdr::to_xdr(&sc_val) {
+                    let size = xdr_bytes.len();
+                    if size > 256 {
+                        panic!(
+                            "Event data size {} exceeds 256-byte budget. Emits must be compact.",
+                            size
+                        );
+                    }
                 }
             }
             env.events().publish(topics, val);

@@ -441,6 +441,7 @@ impl FamilyWallet {
             TransactionType::RoleChange,
             TransactionType::EmergencyTransfer,
             TransactionType::PolicyCancellation,
+            TransactionType::RegularWithdrawal,
         ] {
             env.storage()
                 .instance()

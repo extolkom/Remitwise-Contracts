@@ -3,6 +3,7 @@
 //! This module validates Issue SC-003 requirements:
 //! - All user-facing query endpoints enforce access control
 //! - Storage key isolation prevents cross-user data access
+#![allow(deprecated)]
 //! - Unauthorized callers are rejected
 
 #![cfg(test)]
@@ -17,7 +18,7 @@ use crate::{ReportingContract, ReportingContractClient, ReportingError};
 
 fn create_test_env() -> Env {
     let env = Env::default();
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     env
 }
 
