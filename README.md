@@ -71,6 +71,10 @@ See [cli/README.md](cli/README.md) for usage instructions.
 - **orchestrator**: Cross-contract coordination
 - **reporting**: Financial reporting and insights
 
+### Deprecated entrypoint guidance
+
+Downstream integrators can review [docs/deprecated-entrypoints.md](docs/deprecated-entrypoints.md) for the current EOL markers and migration paths for deprecated Soroban entrypoints.
+
 ## Prerequisites
 
 - Rust (latest stable version)
