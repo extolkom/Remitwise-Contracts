@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+echo "Validating Cargo.lock soroban-sdk version..."
+python3 scripts/validate_lockfile.py
+
 echo "Building WASM..."
 cargo build --release --target wasm32-unknown-unknown
 
@@ -18,6 +21,18 @@ cargo fmt --all -- --check
 
 echo "Running audit..."
 cargo audit --deny warnings
+
+echo "Running dependency check (GPL & Yanked Crates)..."
+DENY_BIN=""
+if [ -x "$HOME/.cargo/bin/cargo-deny" ]; then
+    DENY_BIN="$HOME/.cargo/bin/cargo-deny"
+elif command -v cargo-deny &> /dev/null; then
+    DENY_BIN="cargo-deny"
+else
+    echo "❌ cargo-deny not found in ~/.cargo/bin or PATH. Please install cargo-deny."
+    exit 1
+fi
+$DENY_BIN check
 
 echo "Running gas benchmarks..."
 ./scripts/run_gas_benchmarks.sh
