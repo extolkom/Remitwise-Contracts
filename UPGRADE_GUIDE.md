@@ -25,6 +25,7 @@ Before upgrading to a new Soroban version:
 - [ ] Plan testnet validation window
 - [ ] Notify stakeholders of upgrade timeline
 - [ ] **Verify admin role transfer security across all contracts**
+- [ ] **Verify storage layout and contract spec changes follow [docs/MIGRATIONS.md](docs/MIGRATIONS.md) to avoid breaking existing state**
 - [ ] **Run comprehensive admin role regression tests**
 
 ## Admin Role Transfer Security
