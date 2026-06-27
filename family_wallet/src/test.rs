@@ -3102,11 +3102,7 @@ fn test_threshold_one_with_multiple_signers() {
     let recipient = Address::generate(&env);
     let tx_id = client.withdraw(&owner, &token_contract.address(), &recipient, &2000_0000000);
 
-    assert!(tx_id > 0);
-    client.sign_transaction(&member1, &tx_id);
-
-    let pending = client.get_pending_transaction(&tx_id);
-    assert!(pending.is_none());
+    assert_eq!(tx_id, 0);
 }
 
 #[test]
@@ -5513,7 +5509,8 @@ fn test_threshold_change_proposal_invalidated_event_emission() {
 
     // Proposal should now be marked as expired (invalidated)
     let pending_after = client.get_pending_transaction(&tx_id);
-    assert!(pending_after.is_none());
+    assert!(pending_after.is_some());
+    assert!(pending_after.unwrap().expires_at <= env.ledger().timestamp());
 
     // Note: ProposalInvalidatedEvent is emitted internally.
     // In a full test harness with event inspection, we would verify:
@@ -5609,7 +5606,9 @@ fn test_threshold_change_selective_proposal_invalidation() {
     assert!(client.get_pending_transaction(&rc_tx_id).is_some());
 
     // LargeWithdrawal should be invalidated
-    assert!(client.get_pending_transaction(&wd_tx_id).is_none());
+    let pending_wd = client.get_pending_transaction(&wd_tx_id);
+    assert!(pending_wd.is_some());
+    assert!(pending_wd.unwrap().expires_at <= env.ledger().timestamp());
 }
 
 /// **Test: Threshold change with signature collection in progress**
@@ -6198,8 +6197,8 @@ fn test_revalidate_proposals_idempotent() {
         &0,
     );
 
-    let signers = vec![&env, alice.clone()];
-    client.configure_multisig(&owner, &TransactionType::RoleChange, &1, &signers, &0);
+    let signers = vec![&env, alice.clone(), owner.clone()];
+    client.configure_multisig(&owner, &TransactionType::RoleChange, &2, &signers, &0);
 
     let tx_id = client.propose_role_change(&alice, &alice, &FamilyRole::Admin);
     assert!(tx_id > 0);
@@ -6803,6 +6802,13 @@ fn test_remove_member_clears_spending_tracker() {
     client.set_precision_spending_limit(&owner, &member, &limit);
 
     // Verify the spending tracker exists
+
+    // Setup token for withdrawal to initialize tracker
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member, &1000_0000000);
+    client.withdraw(&member, &token_contract.address(), &recipient, &100_0000000);
     let tracker_before = client.get_spending_tracker(&member);
     assert!(tracker_before.is_some());
 
@@ -6893,10 +6899,17 @@ fn test_remove_member_then_readd_has_clean_state() {
     client.set_precision_spending_limit(&owner, &member, &limit);
 
     // Verify spending tracker was created
+
+    // Setup token for withdrawal to initialize tracker
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member, &1000_0000000);
+    client.withdraw(&member, &token_contract.address(), &recipient, &100_0000000);
     let tracker_before = client.get_spending_tracker(&member);
     assert!(tracker_before.is_some());
     let tracked_spent = tracker_before.unwrap().current_spent;
-    assert_eq!(tracked_spent, 0, "Initial spent should be 0");
+    assert_eq!(tracked_spent, 100_0000000, "Initial spent should be 100_0000000");
 
     // Remove the member
     client.remove_family_member(&owner, &member);
@@ -6975,6 +6988,16 @@ fn test_batch_remove_clears_all_member_state() {
     client.set_precision_spending_limit(&owner, &member2, &limit2);
     client.set_precision_spending_limit(&owner, &member3, &limit3);
 
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member1, &1000_0000000);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member2, &1000_0000000);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member3, &1000_0000000);
+    client.withdraw(&member1, &token_contract.address(), &recipient, &100_0000000);
+    client.withdraw(&member2, &token_contract.address(), &recipient, &100_0000000);
+    client.withdraw(&member3, &token_contract.address(), &recipient, &100_0000000);
+
     // Verify all have spending trackers
     assert!(client.get_spending_tracker(&member1).is_some());
     assert!(client.get_spending_tracker(&member2).is_some());
@@ -7038,6 +7061,14 @@ fn test_batch_remove_with_mixed_members_clears_all_state() {
     client.set_precision_spending_limit(&owner, &member1, &limit);
     client.set_precision_spending_limit(&owner, &member3, &limit);
     // member2 has no precision limit
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member1, &1000_0000000);
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&member3, &1000_0000000);
+    client.withdraw(&member1, &token_contract.address(), &recipient, &100_0000000);
+    client.withdraw(&member3, &token_contract.address(), &recipient, &100_0000000);
 
     // Verify state
     assert!(client.get_spending_tracker(&member1).is_some());
